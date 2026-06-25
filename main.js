@@ -1,5 +1,5 @@
 import { Actor } from 'apify';
-import { CheerioCrawler } from 'crawlee';
+import { PlaywrightCrawler } from 'crawlee';
 
 // Initialize the Apify SDK
 await Actor.init();
@@ -22,10 +22,17 @@ const {
     ],
     limitPerQuery = 20,
     usePersistenceFilter = true,
-    persistenceStoreName = "linkedin-connection-scraper-state"
+    persistenceStoreName = "linkedin-connection-scraper-state",
+    linkedinCookie = ""
 } = input;
 
-console.log(`Starting LinkedIn Connections Persistent Scraper with parameters:`);
+if (!linkedinCookie) {
+    console.error("FATAL ERROR: 'linkedinCookie' is missing from input.");
+    console.error("This actor searches LinkedIn directly and requires a valid 'li_at' session cookie.");
+    await Actor.exit({ exitCode: 1 });
+}
+
+console.log(`Starting LinkedIn Authenticated Scraper with parameters:`);
 console.log(`- Roles: ${JSON.stringify(roles)}`);
 console.log(`- Regions: ${JSON.stringify(regions)}`);
 console.log(`- Context Keywords: ${JSON.stringify(contextKeywords)}`);
@@ -56,43 +63,32 @@ const seenInCurrentRun = new Set();
 
 const initialRequests = [];
 
-// Formulate search dorks: site:linkedin.com/in/ "Role" "Region" "Context"
+// Formulate LinkedIn internal search queries
 for (const role of roles) {
     for (const region of regions) {
         if (contextKeywords && contextKeywords.length > 0) {
             for (const context of contextKeywords) {
-                const searchString = `site:linkedin.com/in/ "${role}" "${region}" "${context}"`;
-                const searchUrl = `https://search.yahoo.com/search?p=${encodeURIComponent(searchString)}`;
+                const searchString = `"${role}" "${region}" "${context}"`;
+                const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(searchString)}&origin=GLOBAL_SEARCH_HEADER`;
                 
                 initialRequests.push({
                     url: searchUrl,
-                    userData: {
-                        role,
-                        region,
-                        context,
-                        searchString
-                    }
+                    userData: { role, region, context, searchString }
                 });
             }
         } else {
-            // Search without context if none provided
-            const searchString = `site:linkedin.com/in/ "${role}" "${region}"`;
-            const searchUrl = `https://search.yahoo.com/search?p=${encodeURIComponent(searchString)}`;
+            const searchString = `"${role}" "${region}"`;
+            const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(searchString)}&origin=GLOBAL_SEARCH_HEADER`;
             
             initialRequests.push({
                 url: searchUrl,
-                userData: {
-                    role,
-                    region,
-                    context: "",
-                    searchString
-                }
+                userData: { role, region, context: "", searchString }
             });
         }
     }
 }
 
-// Load Apify Proxy to prevent bot blocking from DuckDuckGo
+// Load Apify Proxy to prevent bot blocking (LinkedIn limits IPs even when logged in)
 const proxyConfiguration = await Actor.createProxyConfiguration();
 
 console.log(`Generated ${initialRequests.length} search queries to execute.`);
@@ -100,145 +96,125 @@ console.log(`Generated ${initialRequests.length} search queries to execute.`);
 let newProfilesScraped = 0;
 let duplicatesSkipped = 0;
 
-// Setup Crawlee CheerioCrawler
-const crawler = new CheerioCrawler({
+// Setup Crawlee PlaywrightCrawler
+const crawler = new PlaywrightCrawler({
     proxyConfiguration,
-    maxConcurrency: 3, // Low concurrency to avoid DuckDuckGo rate-limiting/blocking
-    minConcurrency: 1,
+    maxConcurrency: 1, // Must be 1 when logged into LinkedIn to avoid account bans and aggressive rate limits
+    headless: true,
 
     preNavigationHooks: [
-        async (crawlingContext, gotOptions) => {
-            const userAgents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-            ];
-            const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+        async ({ page, request }) => {
+            // Inject the LinkedIn session cookie into the browser before navigating
+            await page.context().addCookies([{
+                name: 'li_at',
+                value: linkedinCookie,
+                domain: '.linkedin.com',
+                path: '/'
+            }]);
 
-            gotOptions.headers = {
-                ...gotOptions.headers,
-                'User-Agent': randomAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.yahoo.com/'
-            };
-
-            const delayMs = Math.floor(Math.random() * 2000) + 1500;
+            // Add a randomized human-like delay before each request (3s to 6s)
+            const delayMs = Math.floor(Math.random() * 3000) + 3000;
             await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
     ],
 
-    async requestHandler({ $, request }) {
+    async requestHandler({ page, request }) {
         const { url, userData } = request;
-        console.log(`Processing search page: ${url}`);
+        console.log(`Processing search page for: ${userData.searchString}`);
+
+        // Wait for results to load
+        try {
+            await page.waitForSelector('.search-results-container, .search-reusables__no-results', { timeout: 15000 });
+        } catch (e) {
+            console.error('Timeout waiting for search results. This could mean the cookie is invalid, expired, or LinkedIn is showing a CAPTCHA/Verification.');
+            // Check if we hit the auth wall
+            if (await page.$('.login__form') || await page.$('form[action="/checkpoint/lg/login-submit"]')) {
+                throw new Error("Cookie is invalid or expired. LinkedIn redirected to the login page.");
+            }
+        }
+
+        // Scroll down to ensure all result elements render fully
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
 
         const results = [];
         let itemsProcessed = 0;
 
-        $('.compTitle h3.title a').each((i, element) => {
-            if (itemsProcessed >= limitPerQuery) return false;
-
-            const title = $(element).text().trim();
-            const rawLink = $(element).attr('href');
-            const snippet = $(element).closest('.algo, .algo-sr, .dd.algo, .d-algo').find('.compText').text().trim();
-
-            let link = rawLink;
-            if (rawLink && rawLink.includes('RU=')) {
-                const match = rawLink.match(/RU=([^/]+)\/RK=/);
-                if (match) {
-                    try {
-                        link = decodeURIComponent(match[1]);
-                    } catch (e) {}
-                }
-            }
-
-            if (link) {
-                let cleanUrl = link;
-
-                // Check if it's a valid LinkedIn personal profile URL
-                const isProfile = cleanUrl.includes('linkedin.com/in/') && 
-                                 !cleanUrl.includes('/dir/') && 
-                                 !cleanUrl.includes('/jobs/') &&
-                                 !cleanUrl.includes('/pulse/') &&
-                                 !cleanUrl.includes('/company/') &&
-                                 !cleanUrl.includes('/posts/');
-
-                if (isProfile) {
-                    // Normalize URL for deduplication (strip query params, trailing slashes, downcase)
-                    const normalizedUrl = cleanUrl.split('?')[0].replace(/\/$/, '').toLowerCase().trim();
-                    
-                    // 1. Check if seen in current run
-                    if (seenInCurrentRun.has(normalizedUrl)) {
-                        return; // Skip duplicate inside the current run
-                    }
-                    seenInCurrentRun.add(normalizedUrl);
-
-                    // 2. Check if already scraped in previous runs (persistent state)
-                    if (usePersistenceFilter && scrapedProfilesSet.has(normalizedUrl)) {
-                        duplicatesSkipped++;
-                        return; // Skip duplicate across runs
-                    }
-
-                    // If not a duplicate, parse title/role information
-                    // DuckDuckGo title typically looks like: "Jane Doe - Technical Recruiter - Google | LinkedIn"
-                    let name = 'LinkedIn Member';
-                    let roleTitle = 'Recruitment Professional';
-                    
-                    // Strip "| LinkedIn" (case-insensitive)
-                    const cleanTitle = title.replace(/\s*\|\s*LinkedIn/gi, '');
-                    const parts = cleanTitle.split(/\s+[-–—]\s+/);
-                    
-                    if (parts.length > 0 && parts[0].trim()) {
-                        name = parts[0].trim();
-                    }
-                    if (parts.length > 1 && parts[1].trim()) {
-                        roleTitle = parts.slice(1).join(' - ').trim();
-                    }
-
-                    // Try to guess the company name from the role title or snippet
-                    let company = 'Unknown Company';
-                    const companyRegex = /\b(?:at|for|partner\s+at)\s+([A-Z][A-Za-z0-9\s,&.]{1,25})/i;
-                    const companyMatch = roleTitle.match(companyRegex) || snippet.match(companyRegex);
-                    if (companyMatch) {
-                        company = companyMatch[1].trim().replace(/\s+in\s+.*$/i, ''); // Strip trailing location matches
-                    } else {
-                        // Fallback check: look for capitalized words after "at"
-                        const simpleAtRegex = /at\s+([A-Z][a-zA-Z\s]{1,15})/g;
-                        const simpleMatch = simpleAtRegex.exec(roleTitle) || simpleAtRegex.exec(snippet);
-                        if (simpleMatch) {
-                            company = simpleMatch[1].trim();
-                        }
-                    }
-
-                    // Record the profile
-                    results.push({
-                        name,
-                        title: roleTitle,
-                        company,
-                        location: userData.region,
-                        searchRole: userData.role,
-                        searchContext: userData.context,
-                        profileUrl: normalizedUrl,
-                        scrapedAt: new Date().toISOString()
-                    });
-
-                    // Add to persistence set so we don't scrape it later in this or future runs
-                    scrapedProfilesSet.add(normalizedUrl);
-                    newProfilesScraped++;
-                    itemsProcessed++;
-                }
-            }
+        // Parse results from the DOM
+        const parsedResults = await page.$$eval('.reusable-search__result-container', (elements) => {
+            return elements.map(el => {
+                const linkEl = el.querySelector('.app-aware-link');
+                const titleWrapper = el.querySelector('.entity-result__title-text');
+                const nameSpan = titleWrapper ? titleWrapper.querySelector('span[aria-hidden="true"]') : null;
+                const subtitleEl = el.querySelector('.entity-result__primary-subtitle'); // Title/Role
+                const locationEl = el.querySelector('.entity-result__secondary-subtitle'); // Location
+                
+                return {
+                    link: linkEl ? linkEl.getAttribute('href') : '',
+                    name: nameSpan ? nameSpan.innerText.trim() : (titleWrapper ? titleWrapper.innerText.trim() : 'LinkedIn Member'),
+                    title: subtitleEl ? subtitleEl.innerText.trim() : '',
+                    location: locationEl ? locationEl.innerText.trim() : ''
+                };
+            });
         });
 
-        console.log(`Found ${results.length} new profiles for query: "${userData.role}" in "${userData.region}" ("${userData.context}").`);
+        for (const element of parsedResults) {
+            if (itemsProcessed >= limitPerQuery) break; // Break loop if we reached query limit
+
+            let { link, name, title, location } = element;
+
+            if (link && link.includes('/in/')) {
+                // Ensure it's a full URL
+                let cleanUrl = link;
+                if (!cleanUrl.startsWith('http')) {
+                    cleanUrl = `https://www.linkedin.com${cleanUrl}`;
+                }
+
+                // Normalize URL for deduplication
+                const normalizedUrl = cleanUrl.split('?')[0].replace(/\/$/, '').toLowerCase().trim();
+                
+                // 1. Check if seen in current run
+                if (seenInCurrentRun.has(normalizedUrl)) {
+                    continue; // Skip duplicate inside the current run
+                }
+                seenInCurrentRun.add(normalizedUrl);
+
+                // 2. Check if already scraped in previous runs
+                if (usePersistenceFilter && scrapedProfilesSet.has(normalizedUrl)) {
+                    duplicatesSkipped++;
+                    continue; // Skip duplicate across runs
+                }
+
+                // Clean up name artifacts
+                name = name.split('\n')[0].trim();
+
+                // Record the profile
+                results.push({
+                    name,
+                    title,
+                    location: location || userData.region,
+                    searchRole: userData.role,
+                    searchContext: userData.context,
+                    profileUrl: normalizedUrl,
+                    scrapedAt: new Date().toISOString()
+                });
+
+                // Add to persistence set
+                scrapedProfilesSet.add(normalizedUrl);
+                newProfilesScraped++;
+                itemsProcessed++;
+            }
+        }
+
+        console.log(`Found ${results.length} new profiles out of ${parsedResults.length} parsed items on this page.`);
         if (results.length > 0) {
             await Actor.pushData(results);
         }
     },
 
-    failedRequestHandler({ request }) {
+    failedRequestHandler({ request, error }) {
         console.error(`Request failed repeatedly: ${request.url}`);
+        console.error(`Error details: ${error.message}`);
     }
 });
 

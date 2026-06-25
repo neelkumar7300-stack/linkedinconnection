@@ -1,5 +1,5 @@
-# Use the official Apify Node.js image
-FROM apify/actor-node:20
+# Use the official Apify Node.js Playwright image
+FROM apify/actor-node-playwright-chrome:20
 
 # Copy package.json to the image
 COPY package*.json ./

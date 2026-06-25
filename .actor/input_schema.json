@@ -47,9 +47,16 @@
     "usePersistenceFilter": {
       "title": "Filter Out Previously Scraped Profiles",
       "type": "boolean",
-      "description": "If enabled, the actor will not scrape profiles that were already scraped in previous runs of this actor.",
+      "description": "If enabled, keeps a persistent record of scraped profiles to prevent duplicates across separate runs.",
       "editor": "checkbox",
       "default": true
+    },
+    "linkedinCookie": {
+      "title": "LinkedIn 'li_at' Cookie",
+      "description": "Your LinkedIn session cookie used to authenticate directly with LinkedIn. Use a dummy account cookie.",
+      "type": "string",
+      "editor": "textfield",
+      "default": ""
     },
     "persistenceStoreName": {
       "title": "Named Key-Value Store for Persistence",
@@ -64,6 +71,7 @@
     "regions",
     "limitPerQuery",
     "usePersistenceFilter",
+    "linkedinCookie",
     "persistenceStoreName"
   ]
 }
