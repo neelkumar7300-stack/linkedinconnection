@@ -1,5 +1,5 @@
 import { Actor } from 'apify';
-import { CheerioCrawler } from 'crawlee';
+import { PlaywrightCrawler } from 'crawlee';
 
 // Initialize the Apify SDK
 await Actor.init();
@@ -100,49 +100,50 @@ console.log(`Generated ${initialRequests.length} search queries to execute.`);
 let newProfilesScraped = 0;
 let duplicatesSkipped = 0;
 
-// Setup Crawlee CheerioCrawler
-const crawler = new CheerioCrawler({
+// Setup Crawlee PlaywrightCrawler
+const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     maxConcurrency: 3, // Low concurrency to avoid DuckDuckGo rate-limiting/blocking
     minConcurrency: 1,
 
     preNavigationHooks: [
-        async (crawlingContext, gotOptions) => {
-            const userAgents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-            ];
-            const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
-
-            gotOptions.headers = {
-                ...gotOptions.headers,
-                'User-Agent': randomAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://duckduckgo.com/'
-            };
-
-            // Implement a randomized delay to behave like a human (1.5s to 3.5s)
+        async (crawlingContext) => {
             const delayMs = Math.floor(Math.random() * 2000) + 1500;
             await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
     ],
 
-    async requestHandler({ $, request }) {
+    async requestHandler({ page, request }) {
         const { url, userData } = request;
         console.log(`Processing search page: ${url}`);
+
+        // Wait for results to load
+        try {
+            await page.waitForSelector('.result', { timeout: 10000 });
+        } catch (e) {
+            console.log('No results found or page blocked by DuckDuckGo CAPTCHA.');
+        }
 
         const results = [];
         let itemsProcessed = 0;
 
-        $('.result').each((i, element) => {
-            if (itemsProcessed >= limitPerQuery) return false; // Break loop if we reached query limit
+        const parsedResults = await page.$$eval('.result', (elements) => {
+            return elements.map(el => {
+                const titleEl = el.querySelector('.result__title');
+                const linkEl = el.querySelector('.result__url');
+                const snippetEl = el.querySelector('.result__snippet');
+                return {
+                    title: titleEl ? titleEl.innerText.trim() : '',
+                    link: linkEl ? linkEl.getAttribute('href') : '',
+                    snippet: snippetEl ? snippetEl.innerText.trim() : ''
+                };
+            });
+        });
 
-            const title = $(element).find('.result__title').text().trim();
-            const link = $(element).find('.result__url').attr('href');
-            const snippet = $(element).find('.result__snippet').text().trim();
+        for (const element of parsedResults) {
+            if (itemsProcessed >= limitPerQuery) break; // Break loop if we reached query limit
+
+            const { title, link, snippet } = element;
 
             if (link) {
                 let cleanUrl = link;
@@ -232,7 +233,7 @@ const crawler = new CheerioCrawler({
                     itemsProcessed++;
                 }
             }
-        });
+        }
 
         console.log(`Found ${results.length} new profiles for query: "${userData.role}" in "${userData.region}" ("${userData.context}").`);
         if (results.length > 0) {
