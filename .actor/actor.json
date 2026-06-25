@@ -1,0 +1,9 @@
+{
+  "actorSpecification": 1,
+  "name": "apify-linkedin-connection-scraper",
+  "title": "LinkedIn Connections Persistent Scraper",
+  "description": "Scrapes public LinkedIn profiles for recruiters & HR professionals based on location and keywords, with persistent duplicate filtering.",
+  "version": "1.0",
+  "buildTag": "latest",
+  "input": "./input_schema.json"
+}

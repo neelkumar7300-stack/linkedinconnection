@@ -1,0 +1,13 @@
+{
+  "name": "apify-linkedin-connection-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Apify Actor to scrape LinkedIn connections with persistent deduplication and configurable filters.",
+  "dependencies": {
+    "apify": "^3.7.2",
+    "crawlee": "^3.11.0"
+  },
+  "scripts": {
+    "start": "node main.js"
+  }
+}

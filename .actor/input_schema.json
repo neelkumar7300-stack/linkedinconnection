@@ -1,0 +1,69 @@
+{
+  "title": "LinkedIn Connections Persistent Scraper Input Schema",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "roles": {
+      "title": "Outreach Roles / Titles",
+      "type": "array",
+      "description": "Recruiter/HR roles to search for (e.g. 'Recruiter', 'HR Professional', 'Talent Acquisition').",
+      "editor": "stringList",
+      "default": [
+        "Recruiter",
+        "Talent Acquisition",
+        "HR Manager",
+        "HR Professional",
+        "Technical Recruiter"
+      ]
+    },
+    "regions": {
+      "title": "Target Regions / Locations",
+      "type": "array",
+      "description": "Target locations or regions to filter by (e.g. 'Greater Toronto Area', 'Greater New York City Area').",
+      "editor": "stringList",
+      "default": [
+        "Greater Toronto Area"
+      ]
+    },
+    "contextKeywords": {
+      "title": "IT / Job Context Keywords",
+      "type": "array",
+      "description": "Specific industry or role contexts to filter profiles (e.g. 'IT Helpdesk', 'IT Support', 'IT').",
+      "editor": "stringList",
+      "default": [
+        "IT Helpdesk",
+        "IT Support",
+        "IT"
+      ]
+    },
+    "limitPerQuery": {
+      "title": "Limit Per Search Query",
+      "type": "integer",
+      "description": "Maximum profile results to scrape per query/region pair.",
+      "editor": "number",
+      "default": 20,
+      "minimum": 1
+    },
+    "usePersistenceFilter": {
+      "title": "Filter Out Previously Scraped Profiles",
+      "type": "boolean",
+      "description": "If enabled, the actor will not scrape profiles that were already scraped in previous runs of this actor.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "persistenceStoreName": {
+      "title": "Named Key-Value Store for Persistence",
+      "type": "string",
+      "description": "The name of the Key-Value store to save and load scraped profile URLs for deduplication across runs.",
+      "editor": "textfield",
+      "default": "linkedin-connection-scraper-state"
+    }
+  },
+  "required": [
+    "roles",
+    "regions",
+    "limitPerQuery",
+    "usePersistenceFilter",
+    "persistenceStoreName"
+  ]
+}
