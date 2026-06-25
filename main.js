@@ -1,10 +1,9 @@
 import { Actor } from 'apify';
-import { PlaywrightCrawler } from 'crawlee';
 
 // Initialize the Apify SDK
 await Actor.init();
 
-// Fetch Actor inputs with defaults matching the user's specific request
+// Fetch Actor inputs
 const input = await Actor.getInput() || {};
 const {
     roles = [
@@ -22,31 +21,22 @@ const {
     ],
     limitPerQuery = 20,
     usePersistenceFilter = true,
-    persistenceStoreName = "linkedin-connection-scraper-state",
-    linkedinCookie = ""
+    persistenceStoreName = "linkedin-connection-scraper-state"
 } = input;
 
-if (!linkedinCookie) {
-    console.error("FATAL ERROR: 'linkedinCookie' is missing from input.");
-    console.error("This actor searches LinkedIn directly and requires a valid 'li_at' session cookie.");
-    await Actor.exit({ exitCode: 1 });
-}
-
-console.log(`Starting LinkedIn Authenticated Scraper with parameters:`);
+console.log(`Starting LinkedIn Orchestration Scraper with parameters:`);
 console.log(`- Roles: ${JSON.stringify(roles)}`);
 console.log(`- Regions: ${JSON.stringify(regions)}`);
 console.log(`- Context Keywords: ${JSON.stringify(contextKeywords)}`);
 console.log(`- Limit Per Query: ${limitPerQuery}`);
 console.log(`- Persistent Deduplication Filter: ${usePersistenceFilter ? 'ENABLED' : 'DISABLED'}`);
-console.log(`- Key-Value Store Name: ${persistenceStoreName}`);
 
-// Load previously scraped profiles to support persistent deduplication across runs
+// 1. Load previously scraped profiles to support persistent deduplication across runs
 const scrapedProfilesSet = new Set();
 let store = null;
 
 if (usePersistenceFilter) {
     try {
-        console.log(`Opening named Key-Value Store: "${persistenceStoreName}"...`);
         store = await Actor.openKeyValueStore(persistenceStoreName);
         const previouslyScraped = await store.getValue('alreadyScraped') || [];
         console.log(`Loaded ${previouslyScraped.length} previously scraped profiles from persistent storage.`);
@@ -54,191 +44,152 @@ if (usePersistenceFilter) {
             scrapedProfilesSet.add(url.toLowerCase().trim());
         }
     } catch (e) {
-        console.error(`Failed to load persistent state. Proceeding without history. Error:`, e);
+        console.error(`Failed to load persistent state. Proceeding without history. Error:`, e.message);
     }
 }
 
-// Track seen URLs in the current run (to prevent internal query duplicates)
-const seenInCurrentRun = new Set();
+// 2. Formulate Google Search queries
+const queries = [];
+const queryMetadata = {}; // Keep track of what role/region a query corresponds to
 
-const initialRequests = [];
-
-// Formulate LinkedIn internal search queries
 for (const role of roles) {
     for (const region of regions) {
         if (contextKeywords && contextKeywords.length > 0) {
             for (const context of contextKeywords) {
-                const searchString = `"${role}" "${region}" "${context}"`;
-                const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(searchString)}&origin=GLOBAL_SEARCH_HEADER`;
-                
-                initialRequests.push({
-                    url: searchUrl,
-                    userData: { role, region, context, searchString }
-                });
+                const term = `site:linkedin.com/in/ "${role}" "${region}" "${context}"`;
+                queries.push(term);
+                queryMetadata[term] = { role, region, context };
             }
         } else {
-            const searchString = `"${role}" "${region}"`;
-            const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(searchString)}&origin=GLOBAL_SEARCH_HEADER`;
-            
-            initialRequests.push({
-                url: searchUrl,
-                userData: { role, region, context: "", searchString }
-            });
+            const term = `site:linkedin.com/in/ "${role}" "${region}"`;
+            queries.push(term);
+            queryMetadata[term] = { role, region, context: "" };
         }
     }
 }
 
-// Load Apify Proxy to prevent bot blocking (LinkedIn limits IPs even when logged in)
-const proxyConfiguration = await Actor.createProxyConfiguration();
+console.log(`Generated ${queries.length} search queries. Dispatching to Apify Google Search Scraper...`);
 
-console.log(`Generated ${initialRequests.length} search queries to execute.`);
+// 3. Call the official apify/google-search-scraper
+// This costs a small amount of compute units but guarantees bypassing all CAPTCHAs and blocks.
+let run;
+try {
+    run = await Actor.call('apify/google-search-scraper', {
+        queries: queries.join('\n'),
+        resultsPerPage: limitPerQuery > 100 ? 100 : limitPerQuery,
+        maxPagesPerQuery: Math.ceil(limitPerQuery / 100) || 1,
+        mobileResults: false,
+    });
+} catch (error) {
+    console.error("Failed to call apify/google-search-scraper. Make sure you have enough Apify credits.");
+    throw error;
+}
 
+console.log(`Google Search Scraper finished successfully (Run ID: ${run.id}). Processing results...`);
+
+// 4. Fetch the dataset produced by the Google Search Scraper
+const dataset = await Actor.openDataset(run.defaultDatasetId, { forceCloud: true });
+const { items } = await dataset.getData();
+
+const finalProfiles = [];
 let newProfilesScraped = 0;
 let duplicatesSkipped = 0;
+const seenInCurrentRun = new Set();
 
-// Setup Crawlee PlaywrightCrawler
-const crawler = new PlaywrightCrawler({
-    proxyConfiguration,
-    maxConcurrency: 1, // Must be 1 when logged into LinkedIn to avoid account bans and aggressive rate limits
-    headless: true,
+for (const item of items) {
+    // Check if the query matched one of ours to fetch the metadata
+    const term = item.searchQuery?.term || "";
+    const meta = queryMetadata[term] || { role: "Unknown", region: "Unknown", context: "" };
+    
+    const organicResults = item.organicResults || [];
+    let itemsProcessed = 0;
 
-    preNavigationHooks: [
-        async ({ page, request }) => {
-            // Inject the LinkedIn session cookie into the browser before navigating
-            await page.context().addCookies([{
-                name: 'li_at',
-                value: linkedinCookie,
-                domain: '.linkedin.com',
-                path: '/'
-            }]);
+    for (const result of organicResults) {
+        if (itemsProcessed >= limitPerQuery) break;
 
-            // Add a randomized human-like delay before each request (3s to 6s)
-            const delayMs = Math.floor(Math.random() * 3000) + 3000;
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-    ],
+        const { title = "", url = "", description = "" } = result;
 
-    async requestHandler({ page, request }) {
-        const { url, userData } = request;
-        console.log(`Processing search page for: ${userData.searchString}`);
+        if (url && url.includes('linkedin.com/in/') && !url.includes('/dir/') && !url.includes('/jobs/')) {
+            // Normalize URL
+            const normalizedUrl = url.split('?')[0].replace(/\/$/, '').toLowerCase().trim();
 
-        // Wait for results to load
-        try {
-            await page.waitForSelector('.search-results-container, .search-reusables__no-results', { timeout: 15000 });
-        } catch (e) {
-            console.error('Timeout waiting for search results. This could mean the cookie is invalid, expired, or LinkedIn is showing a CAPTCHA/Verification.');
-            // Check if we hit the auth wall
-            if (await page.$('.login__form') || await page.$('form[action="/checkpoint/lg/login-submit"]')) {
-                throw new Error("Cookie is invalid or expired. LinkedIn redirected to the login page.");
+            if (seenInCurrentRun.has(normalizedUrl)) continue;
+            seenInCurrentRun.add(normalizedUrl);
+
+            if (usePersistenceFilter && scrapedProfilesSet.has(normalizedUrl)) {
+                duplicatesSkipped++;
+                continue;
             }
-        }
 
-        // Scroll down to ensure all result elements render fully
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+            // Extract Name and Role Title
+            let name = 'LinkedIn Member';
+            let roleTitle = 'Professional';
+            
+            // Clean Google's appended " - LinkedIn" string
+            const cleanTitle = title.replace(/\s*[-|]\s*LinkedIn/i, '').trim();
+            const parts = cleanTitle.split(/\s+[-–—]\s+/);
+            
+            if (parts.length > 0 && parts[0].trim()) {
+                name = parts[0].trim();
+            }
+            if (parts.length > 1 && parts[1].trim()) {
+                roleTitle = parts.slice(1).join(' - ').trim();
+            }
 
-        const results = [];
-        let itemsProcessed = 0;
+            // Attempt to extract company
+            let company = 'Unknown Company';
+            const companyRegex = /\b(?:at|for|partner\s+at)\s+([A-Z][A-Za-z0-9\s,&.]{1,25})/i;
+            const companyMatch = roleTitle.match(companyRegex) || description.match(companyRegex);
+            if (companyMatch) {
+                company = companyMatch[1].trim().replace(/\s+in\s+.*$/i, '');
+            } else {
+                const simpleAtRegex = /at\s+([A-Z][a-zA-Z\s]{1,15})/g;
+                const simpleMatch = simpleAtRegex.exec(roleTitle) || simpleAtRegex.exec(description);
+                if (simpleMatch) {
+                    company = simpleMatch[1].trim();
+                }
+            }
 
-        // Parse results from the DOM
-        const parsedResults = await page.$$eval('.reusable-search__result-container', (elements) => {
-            return elements.map(el => {
-                const linkEl = el.querySelector('.app-aware-link');
-                const titleWrapper = el.querySelector('.entity-result__title-text');
-                const nameSpan = titleWrapper ? titleWrapper.querySelector('span[aria-hidden="true"]') : null;
-                const subtitleEl = el.querySelector('.entity-result__primary-subtitle'); // Title/Role
-                const locationEl = el.querySelector('.entity-result__secondary-subtitle'); // Location
-                
-                return {
-                    link: linkEl ? linkEl.getAttribute('href') : '',
-                    name: nameSpan ? nameSpan.innerText.trim() : (titleWrapper ? titleWrapper.innerText.trim() : 'LinkedIn Member'),
-                    title: subtitleEl ? subtitleEl.innerText.trim() : '',
-                    location: locationEl ? locationEl.innerText.trim() : ''
-                };
+            finalProfiles.push({
+                name,
+                title: roleTitle,
+                company,
+                location: meta.region,
+                searchRole: meta.role,
+                searchContext: meta.context,
+                profileUrl: normalizedUrl,
+                scrapedAt: new Date().toISOString()
             });
-        });
 
-        for (const element of parsedResults) {
-            if (itemsProcessed >= limitPerQuery) break; // Break loop if we reached query limit
-
-            let { link, name, title, location } = element;
-
-            if (link && link.includes('/in/')) {
-                // Ensure it's a full URL
-                let cleanUrl = link;
-                if (!cleanUrl.startsWith('http')) {
-                    cleanUrl = `https://www.linkedin.com${cleanUrl}`;
-                }
-
-                // Normalize URL for deduplication
-                const normalizedUrl = cleanUrl.split('?')[0].replace(/\/$/, '').toLowerCase().trim();
-                
-                // 1. Check if seen in current run
-                if (seenInCurrentRun.has(normalizedUrl)) {
-                    continue; // Skip duplicate inside the current run
-                }
-                seenInCurrentRun.add(normalizedUrl);
-
-                // 2. Check if already scraped in previous runs
-                if (usePersistenceFilter && scrapedProfilesSet.has(normalizedUrl)) {
-                    duplicatesSkipped++;
-                    continue; // Skip duplicate across runs
-                }
-
-                // Clean up name artifacts
-                name = name.split('\n')[0].trim();
-
-                // Record the profile
-                results.push({
-                    name,
-                    title,
-                    location: location || userData.region,
-                    searchRole: userData.role,
-                    searchContext: userData.context,
-                    profileUrl: normalizedUrl,
-                    scrapedAt: new Date().toISOString()
-                });
-
-                // Add to persistence set
-                scrapedProfilesSet.add(normalizedUrl);
-                newProfilesScraped++;
-                itemsProcessed++;
-            }
+            scrapedProfilesSet.add(normalizedUrl);
+            newProfilesScraped++;
+            itemsProcessed++;
         }
-
-        console.log(`Found ${results.length} new profiles out of ${parsedResults.length} parsed items on this page.`);
-        if (results.length > 0) {
-            await Actor.pushData(results);
-        }
-    },
-
-    failedRequestHandler({ request, error }) {
-        console.error(`Request failed repeatedly: ${request.url}`);
-        console.error(`Error details: ${error.message}`);
     }
-});
+}
 
-// Run crawler
-console.log('Running search requests...');
-await crawler.run(initialRequests);
+// 5. Save results to our own dataset
+if (finalProfiles.length > 0) {
+    console.log(`Pushing ${finalProfiles.length} unique profiles to the Actor's default dataset...`);
+    await Actor.pushData(finalProfiles);
+}
 
-// Save the updated list of scraped profiles back to persistent Key-Value Store
+// 6. Save updated history to persistent state
 if (usePersistenceFilter && store) {
     console.log(`Saving ${scrapedProfilesSet.size} total scraped profiles back to persistent storage...`);
     try {
         await store.setValue('alreadyScraped', Array.from(scrapedProfilesSet));
         console.log('Persistent storage successfully updated.');
     } catch (e) {
-        console.error('Failed to save updated persistent state:', e);
+        console.error('Failed to save updated persistent state:', e.message);
     }
 }
 
 console.log('--------------------------------------------------');
-console.log('Crawling completed!');
+console.log('Orchestration completed!');
 console.log(`- New profiles scraped and saved to dataset: ${newProfilesScraped}`);
 console.log(`- Persistent duplicate profiles skipped: ${duplicatesSkipped}`);
 console.log(`- Total profiles currently in persistent filter: ${scrapedProfilesSet.size}`);
 console.log('--------------------------------------------------');
 
-// Clean up and exit
 await Actor.exit();

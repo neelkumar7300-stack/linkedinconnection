@@ -51,13 +51,6 @@
       "editor": "checkbox",
       "default": true
     },
-    "linkedinCookie": {
-      "title": "LinkedIn 'li_at' Cookie",
-      "description": "Your LinkedIn session cookie used to authenticate directly with LinkedIn. Use a dummy account cookie.",
-      "type": "string",
-      "editor": "textfield",
-      "default": ""
-    },
     "persistenceStoreName": {
       "title": "Named Key-Value Store for Persistence",
       "type": "string",
@@ -71,7 +64,6 @@
     "regions",
     "limitPerQuery",
     "usePersistenceFilter",
-    "linkedinCookie",
     "persistenceStoreName"
   ]
 }
