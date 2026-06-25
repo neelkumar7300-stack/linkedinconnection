@@ -73,12 +73,17 @@ console.log(`Generated ${queries.length} search queries. Dispatching to Apify Go
 
 // 3. Call the official apify/google-search-scraper
 // This costs a small amount of compute units but guarantees bypassing all CAPTCHAs and blocks.
+// Determine the most efficient limit per query for the Google Scraper
+const optimizedLimitPerQuery = (maxTotalProfiles > 0 && maxTotalProfiles < limitPerQuery) 
+    ? maxTotalProfiles 
+    : limitPerQuery;
+
 let run;
 try {
     run = await Actor.call('apify/google-search-scraper', {
         queries: queries.join('\n'),
-        resultsPerPage: limitPerQuery > 100 ? 100 : limitPerQuery,
-        maxPagesPerQuery: Math.ceil(limitPerQuery / 100) || 1,
+        resultsPerPage: optimizedLimitPerQuery > 100 ? 100 : optimizedLimitPerQuery,
+        maxPagesPerQuery: Math.ceil(optimizedLimitPerQuery / 100) || 1,
         mobileResults: false,
     });
 } catch (error) {
