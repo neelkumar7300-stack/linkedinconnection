@@ -1,5 +1,5 @@
 import { Actor } from 'apify';
-import { PlaywrightCrawler } from 'crawlee';
+import { CheerioCrawler } from 'crawlee';
 
 // Initialize the Apify SDK
 await Actor.init();
@@ -62,7 +62,7 @@ for (const role of roles) {
         if (contextKeywords && contextKeywords.length > 0) {
             for (const context of contextKeywords) {
                 const searchString = `site:linkedin.com/in/ "${role}" "${region}" "${context}"`;
-                const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchString)}`;
+                const searchUrl = `https://search.yahoo.com/search?p=${encodeURIComponent(searchString)}`;
                 
                 initialRequests.push({
                     url: searchUrl,
@@ -77,7 +77,7 @@ for (const role of roles) {
         } else {
             // Search without context if none provided
             const searchString = `site:linkedin.com/in/ "${role}" "${region}"`;
-            const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchString)}`;
+            const searchUrl = `https://search.yahoo.com/search?p=${encodeURIComponent(searchString)}`;
             
             initialRequests.push({
                 url: searchUrl,
@@ -100,65 +100,61 @@ console.log(`Generated ${initialRequests.length} search queries to execute.`);
 let newProfilesScraped = 0;
 let duplicatesSkipped = 0;
 
-// Setup Crawlee PlaywrightCrawler
-const crawler = new PlaywrightCrawler({
+// Setup Crawlee CheerioCrawler
+const crawler = new CheerioCrawler({
     proxyConfiguration,
     maxConcurrency: 3, // Low concurrency to avoid DuckDuckGo rate-limiting/blocking
     minConcurrency: 1,
 
     preNavigationHooks: [
-        async (crawlingContext) => {
+        async (crawlingContext, gotOptions) => {
+            const userAgents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            ];
+            const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+
+            gotOptions.headers = {
+                ...gotOptions.headers,
+                'User-Agent': randomAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://www.yahoo.com/'
+            };
+
             const delayMs = Math.floor(Math.random() * 2000) + 1500;
             await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
     ],
 
-    async requestHandler({ page, request }) {
+    async requestHandler({ $, request }) {
         const { url, userData } = request;
         console.log(`Processing search page: ${url}`);
-
-        // Wait for results to load
-        try {
-            await page.waitForSelector('.result', { timeout: 10000 });
-        } catch (e) {
-            console.log('No results found or page blocked by DuckDuckGo CAPTCHA.');
-        }
 
         const results = [];
         let itemsProcessed = 0;
 
-        const parsedResults = await page.$$eval('.result', (elements) => {
-            return elements.map(el => {
-                const titleEl = el.querySelector('.result__title');
-                const linkEl = el.querySelector('.result__url');
-                const snippetEl = el.querySelector('.result__snippet');
-                return {
-                    title: titleEl ? titleEl.innerText.trim() : '',
-                    link: linkEl ? linkEl.getAttribute('href') : '',
-                    snippet: snippetEl ? snippetEl.innerText.trim() : ''
-                };
-            });
-        });
+        $('.compTitle h3.title a').each((i, element) => {
+            if (itemsProcessed >= limitPerQuery) return false;
 
-        for (const element of parsedResults) {
-            if (itemsProcessed >= limitPerQuery) break; // Break loop if we reached query limit
+            const title = $(element).text().trim();
+            const rawLink = $(element).attr('href');
+            const snippet = $(element).closest('.algo, .algo-sr, .dd.algo, .d-algo').find('.compText').text().trim();
 
-            const { title, link, snippet } = element;
+            let link = rawLink;
+            if (rawLink && rawLink.includes('RU=')) {
+                const match = rawLink.match(/RU=([^/]+)\/RK=/);
+                if (match) {
+                    try {
+                        link = decodeURIComponent(match[1]);
+                    } catch (e) {}
+                }
+            }
 
             if (link) {
                 let cleanUrl = link;
-                
-                // Clean DuckDuckGo's redirection wrappers if present
-                if (link.includes('uddg=')) {
-                    const match = link.match(/uddg=([^&]+)/);
-                    if (match) {
-                        try {
-                            cleanUrl = decodeURIComponent(match[1]);
-                        } catch (e) {
-                            cleanUrl = link;
-                        }
-                    }
-                }
 
                 // Check if it's a valid LinkedIn personal profile URL
                 const isProfile = cleanUrl.includes('linkedin.com/in/') && 
@@ -233,7 +229,7 @@ const crawler = new PlaywrightCrawler({
                     itemsProcessed++;
                 }
             }
-        }
+        });
 
         console.log(`Found ${results.length} new profiles for query: "${userData.role}" in "${userData.region}" ("${userData.context}").`);
         if (results.length > 0) {
