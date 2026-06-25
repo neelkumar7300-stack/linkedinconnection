@@ -19,11 +19,12 @@ const {
         "IT Support",
         "IT"
     ],
-    limitPerQuery = 20,
-    maxTotalProfiles = 0,
     usePersistenceFilter = true,
     persistenceStoreName = "linkedin-connection-scraper-state"
 } = input;
+
+const limitPerQuery = parseInt(input.limitPerQuery || 20, 10);
+const maxTotalProfiles = parseInt(input.maxTotalProfiles || 0, 10);
 
 console.log(`Starting LinkedIn Orchestration Scraper with parameters:`);
 console.log(`- Roles: ${JSON.stringify(roles)}`);
