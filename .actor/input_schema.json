@@ -44,6 +44,14 @@
       "default": 20,
       "minimum": 1
     },
+    "maxTotalProfiles": {
+      "title": "Max Total Profiles",
+      "type": "integer",
+      "description": "The absolute maximum number of new profiles to scrape across the entire run. Set to 0 for unlimited (will just use Limit Per Search Query).",
+      "editor": "number",
+      "default": 0,
+      "minimum": 0
+    },
     "usePersistenceFilter": {
       "title": "Filter Out Previously Scraped Profiles",
       "type": "boolean",

@@ -20,6 +20,7 @@ const {
         "IT"
     ],
     limitPerQuery = 20,
+    maxTotalProfiles = 0,
     usePersistenceFilter = true,
     persistenceStoreName = "linkedin-connection-scraper-state"
 } = input;
@@ -150,6 +151,10 @@ for (const item of items) {
                 }
             }
 
+            if (maxTotalProfiles > 0 && finalProfiles.length >= maxTotalProfiles) {
+                break;
+            }
+
             finalProfiles.push({
                 name,
                 title: roleTitle,
@@ -165,6 +170,10 @@ for (const item of items) {
             newProfilesScraped++;
             itemsProcessed++;
         }
+    }
+    
+    if (maxTotalProfiles > 0 && finalProfiles.length >= maxTotalProfiles) {
+        break;
     }
 }
 
