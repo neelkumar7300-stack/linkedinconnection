@@ -92,6 +92,9 @@ for (const role of roles) {
     }
 }
 
+// Load Apify Proxy to prevent bot blocking from DuckDuckGo
+const proxyConfiguration = await Actor.createProxyConfiguration();
+
 console.log(`Generated ${initialRequests.length} search queries to execute.`);
 
 let newProfilesScraped = 0;
@@ -99,6 +102,7 @@ let duplicatesSkipped = 0;
 
 // Setup Crawlee CheerioCrawler
 const crawler = new CheerioCrawler({
+    proxyConfiguration,
     maxConcurrency: 3, // Low concurrency to avoid DuckDuckGo rate-limiting/blocking
     minConcurrency: 1,
 
